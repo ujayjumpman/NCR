@@ -545,9 +545,9 @@ def generate_ncr_report_for_eligo(df: pd.DataFrame, report_type: str, start_date
                     description = cleaned_record["Description"]
                     
                     # CREATE UNIQUE IDENTIFIER FOR EACH RECORD
-                    unique_id = f"{description[:100]}_{cleaned_record['Created Date (WET)']}_{cleaned_record['Status']}"
+                    unique_id = f"{description}_{cleaned_record['Created Date (WET)']}_{cleaned_record['Status']}"
                     
-                    # Skip if already processed
+                    # # Skip if already processed
                     if unique_id in unique_records:
                         logger.debug(f"Skipping duplicate record: {unique_id}")
                         continue
@@ -848,7 +848,6 @@ def generate_ncr_report_for_eligo(df: pd.DataFrame, report_type: str, start_date
         error_msg = f"❌ Unexpected error in generate_ncr_report: {str(e)}"
         logger.error(error_msg)
         st.error(error_msg)
-        return {"error": str(e)}, ""
 
 
 @st.cache_data
