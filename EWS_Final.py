@@ -221,6 +221,10 @@ def clean_and_parse_json(text):
     logger.error(f"Could not extract valid JSON from: {text}")
     return None
 def assign_site(description: str, standard_sites: list) -> list:
+    """
+    Assign tower sites based on description keywords.
+    Fixed to avoid cross-matching (EWS Tower 1 won't match EWS Tower 2, etc.)
+    """
     if not isinstance(description, str) or not description.strip():
         return ["Common Area"]
 
@@ -230,47 +234,45 @@ def assign_site(description: str, standard_sites: list) -> list:
     # Initialize matched sites
     matched = set()
 
-    # Check shorthand and specific patterns first
-    # The key change is using 'ligh?' to match both 'lig' and 'ligh'
+    # PRIORITY 1: Check for exact shorthand patterns first (most specific)
     shorthand_patterns = {
         r'\bews\s*1\b': "EWS Tower 1",
-        r'\bligh?\s*3\b': "LIG Tower 3",  # MODIFIED
-        r'\bligh?\s*2\b': "LIG Tower 2",  # MODIFIED
-        r'\bligh?\s*1\b': "LIG Tower 1",  # MODIFIED
         r'\bews\s*2\b': "EWS Tower 2",
         r'\bews\s*3\b': "EWS Tower 3",
-        r'\btower\s*ligh?\s*3\b': "LIG Tower 3", # MODIFIED
-        r'\btower\s*ligh?\s*2\b': "LIG Tower 2", # MODIFIED
-        r'\btower\s*ligh?\s*1\b': "LIG Tower 1"  # MODIFIED
+        r'\bligh?\s*1\b': "LIG Tower 1",
+        r'\bligh?\s*2\b': "LIG Tower 2",
+        r'\bligh?\s*3\b': "LIG Tower 3",
     }
     
     for pattern, site_name in shorthand_patterns.items():
         if re.search(pattern, desc) and site_name in standard_sites:
             matched.add(site_name)
 
-    # Check for full tower names (e.g., LIG Tower 3, EWS Tower 1)
+    # PRIORITY 2: If no shorthand match, check for full tower names
     if not matched:
-        # Also modified here to be flexible
-        lig_pattern = r'\bligh?\s*tower\s*(\d)\b' # MODIFIED
-        lig_matches = re.findall(lig_pattern, desc)
-        for tower_num in lig_matches:
-            site_name = f"LIG Tower {tower_num}"
-            if site_name in standard_sites:
-                matched.add(site_name)
-
-        ews_pattern = r'\bews\s*tower\s*(\d)\b'
+        ews_pattern = r'\bews\s+tower\s+([1-3])\b'
         ews_matches = re.findall(ews_pattern, desc)
         for tower_num in ews_matches:
             site_name = f"EWS Tower {tower_num}"
             if site_name in standard_sites:
                 matched.add(site_name)
 
-    # Check for exact or close matches of standard sites
-    for site in standard_sites:
-        # This part can also be made flexible if needed, but the above changes are more targeted.
-        site_pattern = re.escape(site.lower()).replace(' ', r'\s+').replace('lig', 'ligh?')
-        if re.search(rf'\b{site_pattern}\b', desc) and site not in matched:
-            matched.add(site)
+        lig_pattern = r'\bligh?\s+tower\s+([1-3])\b'
+        lig_matches = re.findall(lig_pattern, desc)
+        for tower_num in lig_matches:
+            site_name = f"LIG Tower {tower_num}"
+            if site_name in standard_sites:
+                matched.add(site_name)
+
+    # PRIORITY 3: Check for exact site names from standard_sites list
+    if not matched:
+        for site in standard_sites:
+            if site == "Common Area":
+                continue  # Skip Common Area in pattern matching
+            site_lower = site.lower()
+            site_pattern = re.escape(site_lower).replace(' ', r'\s+').replace('lig', 'ligh?')
+            if re.search(rf'\b{site_pattern}\b', desc):
+                matched.add(site)
 
     # Return matched sites or default to Common Area
     return sorted(matched) if matched else ["Common Area"]
@@ -1461,6 +1463,9 @@ def generate_ncr_Safety_report_for_ews(df, report_type, start_date=None, end_dat
         
 @st.cache_data
 def generate_consolidated_ncr_OpenClose_excel_for_ews(combined_result, report_title="NCR"):
+    """
+    Generate consolidated NCR report with proper Common Area handling
+    """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -1487,16 +1492,19 @@ def generate_consolidated_ncr_OpenClose_excel_for_ews(combined_result, report_ti
         
         # Generate date string
         now = datetime.now()
-        day = now.strftime("%d")
-        month_name = now.strftime("%B")
-        year = now.strftime("%Y")
-        date_part = f"{day}_{month_name}_{year}"
+        date_part = now.strftime("%d_%B_%Y")
         
-        def truncate_sheet_name(base_name, max_length=31):
-            if len(base_name) > max_length:
-                return base_name[:max_length - 3] + "..."
-            return base_name
-
+        # Standard sites including Common Area
+        standard_sites = [
+            "EWS Tower 1",
+            "EWS Tower 2",
+            "EWS Tower 3",
+            "LIG Tower 1",
+            "LIG Tower 2",
+            "LIG Tower 3",
+            "Common Area"
+        ]
+        
         worksheet = workbook.add_worksheet('NCR Report')
         worksheet.set_column('A:A', 20)
         worksheet.set_column('B:H', 12)
@@ -1504,6 +1512,7 @@ def generate_consolidated_ncr_OpenClose_excel_for_ews(combined_result, report_ti
         # Extract data
         resolved_data = combined_result.get("NCR resolved beyond 21 days", {})
         open_data = combined_result.get("NCR open beyond 21 days", {})
+        
         if not isinstance(resolved_data, dict) or "error" in resolved_data:
             resolved_data = {"Sites": {}}
         if not isinstance(open_data, dict) or "error" in open_data:
@@ -1512,34 +1521,26 @@ def generate_consolidated_ncr_OpenClose_excel_for_ews(combined_result, report_ti
         resolved_sites = resolved_data.get("Sites", {})
         open_sites = open_data.get("Sites", {})
         
-        standard_sites = [
-            "EWS Tower 1",
-            "EWS Tower 2",
-            "EWS Tower 3",
-            "LIG Tower 3",
-            "LIG Tower 2",
-            "LIG Tower 1"
-        ]
+        # Build comprehensive site mapping using assign_site
+        site_mapping = {}
+        all_site_keys = set(resolved_sites.keys()) | set(open_sites.keys())
         
-        def normalize_site_name(site):
-            # Simple normalization for EWS/LIG towers
-            site = site.strip()
-            # Handle various naming patterns
-            if "EWS" in site.upper() and "1" in site:
-                return "EWS Tower 1"
-            elif "EWS" in site.upper() and "2" in site:
-                return "EWS Tower 2"
-            elif "EWS" in site.upper() and "3" in site:
-                return "EWS Tower 3"
-            elif "LIG" in site.upper() and "1" in site:
-                return "LIG Tower 1"
-            elif "LIG" in site.upper() and "2" in site:
-                return "LIG Tower 2"
-            elif "LIG" in site.upper() and "3" in site:
-                return "LIG Tower 3"
-            return site
-
-        site_mapping = {k: normalize_site_name(k) for k in (resolved_sites.keys() | open_sites.keys())}
+        for original_key in all_site_keys:
+            # Get descriptions to determine actual tower
+            descriptions = []
+            if original_key in resolved_sites:
+                descriptions.extend(resolved_sites[original_key].get("Descriptions", []))
+            if original_key in open_sites:
+                descriptions.extend(open_sites[original_key].get("Descriptions", []))
+            
+            if descriptions:
+                # Use first description to determine tower
+                detected_sites = assign_site(descriptions[0], standard_sites)
+                site_mapping[original_key] = detected_sites[0]
+            else:
+                # Fallback: try to match the key itself
+                detected_sites = assign_site(original_key, standard_sites)
+                site_mapping[original_key] = detected_sites[0]
         
         # Write header
         worksheet.merge_range('A1:H1', f"{report_title} {date_part}", title_format)
@@ -1559,46 +1560,40 @@ def generate_consolidated_ncr_OpenClose_excel_for_ews(combined_result, report_ti
         worksheet.write(row, 7, '', header_format)
         
         category_map = {
-            'Finishing': ['FW','Civil Finishing ', 'Finishing'],
+            'Finishing': ['FW', 'Civil Finishing', 'Finishing'],
             'Works': ['SW', 'Structure', 'Works'],
             'MEP': ['MEP']
         }
         
         row = 3
-        site_totals = {}
         
+        # Process each standard site
         for site in standard_sites:
-            # Find original keys that map to this standardized site
-            original_resolved_key = None
-            original_open_key = None
-            
-            for original_key, mapped_site in site_mapping.items():
-                if mapped_site == site:
-                    if original_key in resolved_sites:
-                        original_resolved_key = original_key
-                    if original_key in open_sites:
-                        original_open_key = original_key
-            
             resolved_counts = {'Finishing': 0, 'Works': 0, 'MEP': 0}
             open_counts = {'Finishing': 0, 'Works': 0, 'MEP': 0}
             
+            # Find all original keys that map to this site
+            matching_keys = [k for k, v in site_mapping.items() if v == site]
+            
             # Process resolved NCRs
-            if original_resolved_key and original_resolved_key in resolved_sites:
-                site_data = resolved_sites[original_resolved_key]
-                for display_cat, possible_keys in category_map.items():
-                    for key in possible_keys:
-                        value = site_data.get(key, 0)
-                        if isinstance(value, (int, float)) and value > 0:
-                            resolved_counts[display_cat] += value
+            for original_key in matching_keys:
+                if original_key in resolved_sites:
+                    site_data = resolved_sites[original_key]
+                    for display_cat, possible_keys in category_map.items():
+                        for key in possible_keys:
+                            value = site_data.get(key, 0)
+                            if isinstance(value, (int, float)) and value > 0:
+                                resolved_counts[display_cat] += value
             
             # Process open NCRs
-            if original_open_key and original_open_key in open_sites:
-                site_data = open_sites[original_open_key]
-                for display_cat, possible_keys in category_map.items():
-                    for key in possible_keys:
-                        value = site_data.get(key, 0)
-                        if isinstance(value, (int, float)) and value > 0:
-                            open_counts[display_cat] += value
+            for original_key in matching_keys:
+                if original_key in open_sites:
+                    site_data = open_sites[original_key]
+                    for display_cat, possible_keys in category_map.items():
+                        for key in possible_keys:
+                            value = site_data.get(key, 0)
+                            if isinstance(value, (int, float)) and value > 0:
+                                open_counts[display_cat] += value
             
             site_total = sum(resolved_counts.values()) + sum(open_counts.values())
             
@@ -1610,32 +1605,37 @@ def generate_consolidated_ncr_OpenClose_excel_for_ews(combined_result, report_ti
                 worksheet.write(row, i+4, open_counts[display_cat], cell_format)
             worksheet.write(row, 7, site_total, cell_format)
             
-            site_totals[site] = site_total
             row += 1
 
+        # Write detail sheets
         def write_detail_sheet(sheet_name, data, title):
-            truncated_sheet_name = truncate_sheet_name(f"{sheet_name} {date_part}")
-            detail_worksheet = workbook.add_worksheet(truncated_sheet_name)
+            detail_worksheet = workbook.add_worksheet(sheet_name[:31])
             detail_worksheet.set_column('A:A', 20)
             detail_worksheet.set_column('B:B', 60)
             detail_worksheet.set_column('C:D', 20)
-            detail_worksheet.set_column('E:E', 15)
-            detail_worksheet.set_column('F:F', 15)
+            detail_worksheet.set_column('E:F', 15)
+            
             detail_worksheet.merge_range('A1:F1', f"{title} {date_part}", title_format)
             headers = ['Site', 'Description', 'Created Date (WET)', 'Expected Close Date (WET)', 'Status', 'Discipline']
             for col, header in enumerate(headers):
                 detail_worksheet.write(1, col, header, header_format)
+            
             row = 2
-            for site, site_data in data.items():
-                normalized_site = site_mapping.get(site, site)
+            for original_key, site_data in data.items():
+                # Get the mapped site name
+                mapped_site = site_mapping.get(original_key, "Common Area")
+                
                 descriptions = site_data.get("Descriptions", [])
                 created_dates = site_data.get("Created Date (WET)", [])
                 close_dates = site_data.get("Expected Close Date (WET)", [])
                 statuses = site_data.get("Status", [])
                 disciplines = site_data.get("Discipline", [])
-                max_length = max(len(descriptions), len(created_dates), len(close_dates), len(statuses), len(disciplines))
+                
+                max_length = max(len(descriptions), len(created_dates), len(close_dates), 
+                               len(statuses), len(disciplines))
+                
                 for i in range(max_length):
-                    detail_worksheet.write(row, 0, normalized_site, site_format)
+                    detail_worksheet.write(row, 0, mapped_site, site_format)
                     detail_worksheet.write(row, 1, descriptions[i] if i < len(descriptions) else "", cell_format)
                     detail_worksheet.write(row, 2, created_dates[i] if i < len(created_dates) else "", cell_format)
                     detail_worksheet.write(row, 3, close_dates[i] if i < len(close_dates) else "", cell_format)
@@ -1648,8 +1648,8 @@ def generate_consolidated_ncr_OpenClose_excel_for_ews(combined_result, report_ti
         if open_sites:
             write_detail_sheet("Open NCR Details", open_sites, "Open NCR Details")
 
-        output.seek(0)
-        return output
+    output.seek(0)
+    return output
     
 @st.cache_data
 def generate_consolidated_ncr_Housekeeping_excel_for_ews(combined_result, report_title="Housekeeping: Current Month"):
@@ -1886,29 +1886,38 @@ def generate_consolidated_ncr_Safety_excel_for_ews(combined_result, report_title
         return output
     
 @st.cache_data
+@st.cache_data
 def generate_combined_excel_report_for_ews(all_reports, filename_prefix="All_Reports"):
+    """
+    Combined Excel export with proper Common Area handling, tower detection, and colored rows
+    """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
-        
-        # Formatting
+
+        # ---------- Formats ----------
         title_format = workbook.add_format({
-            'bold': True, 'align': 'center', 'valign': 'vcenter', 'fg_color': 'yellow', 'border': 1, 'font_size': 12
+            'bold': True, 'align': 'center', 'valign': 'vcenter',
+            'fg_color': 'yellow', 'border': 1, 'font_size': 12
         })
         header_format = workbook.add_format({
-            'bold': True, 'align': 'center', 'valign': 'vcenter', 'border': 1, 'text_wrap': True
+            'bold': True, 'align': 'center', 'valign': 'vcenter',
+            'border': 1, 'text_wrap': True
         })
         subheader_format = workbook.add_format({
             'bold': True, 'align': 'center', 'valign': 'vcenter', 'border': 1
         })
-        cell_format_base = {
-            'align': 'center', 'valign': 'vcenter', 'border': 1, 'text_wrap': True
-        }
-        site_format_base = {
+        description_format = workbook.add_format({
+            'align': 'left', 'valign': 'vcenter', 'border': 1, 'text_wrap': True
+        })
+        default_cell_format = workbook.add_format({
+            'align': 'center', 'valign': 'vcenter', 'border': 1
+        })
+        default_site_format = workbook.add_format({
             'align': 'left', 'valign': 'vcenter', 'border': 1
-        }
-        
-        # Watercolor-style colors for EWS/LIG towers
+        })
+
+        # ---------- Tower Colors ----------
         tower_colors = {
             "EWS Tower 1": '#F9E79F',  # Soft yellow
             "EWS Tower 2": '#A3CFFA',  # Blue
@@ -1916,196 +1925,151 @@ def generate_combined_excel_report_for_ews(all_reports, filename_prefix="All_Rep
             "LIG Tower 1": '#C4E4B7',  # Green
             "LIG Tower 2": '#F5E8B7',  # Soft yellow
             "LIG Tower 3": '#D7B9F5',  # Soft lavender
+            "Common Area": '#C7CEEA'   # Soft purple
         }
-        
+
         tower_formats = {}
         for site, color in tower_colors.items():
-            tower_formats[site] = {
-                'tower_total': workbook.add_format({
-                    'bold': True, 'align': 'left', 'valign': 'vcenter', 'border': 1, 'fg_color': color
-                }),
-                'site': workbook.add_format({
-                    'align': 'left', 'valign': 'vcenter', 'border': 1, 'fg_color': '#FFFFFF'
-                }),
-                'cell': workbook.add_format({
-                    'align': 'center', 'valign': 'vcenter', 'border': 1, 'text_wrap': True, 'fg_color': '#FFFFFF'
-                })
-            }
-        
-        default_cell_format = workbook.add_format(cell_format_base)
-        default_site_format = workbook.add_format(site_format_base)
-        
-        # Formatting for Safety/Housekeeping
-        description_format = workbook.add_format({
-            'align': 'left', 'valign': 'vcenter', 'border': 1, 'text_wrap': True
-        })
-        
-        # Date handling
-        now = datetime.now()
-        day = now.strftime("%d")
-        month_name = now.strftime("%B")
-        year = now.strftime("%Y")
-        date_part = f"{day}_{month_name}_{year}"
-        
-        def truncate_sheet_name(base_name, max_length=31):
-            if len(base_name) > max_length:
-                return base_name[:max_length - 3] + "..."
-            return base_name
+            tower_formats[site] = workbook.add_format({
+                'align': 'center', 'valign': 'vcenter',
+                'border': 1,
+                'fg_color': color
+            })
 
-        # 1. Combined NCR Report
-        combined_result = all_reports.get("Combined_NCR", {})
-        report_title_ncr = f"NCR: {date_part}"
-        
-        worksheet = workbook.add_worksheet('NCR Report')
-        worksheet.set_column('A:A', 20)
-        worksheet.set_column('B:H', 12)
-        
-        resolved_data = combined_result.get("NCR resolved beyond 21 days", {})
-        open_data = combined_result.get("NCR open beyond 21 days", {})
-        if not isinstance(resolved_data, dict) or "error" in resolved_data:
-            resolved_data = {"Sites": {}}
-        if not isinstance(open_data, dict) or "error" in open_data:
-            open_data = {"Sites": {}}
-            
-        resolved_sites = resolved_data.get("Sites", {})
-        open_sites = open_data.get("Sites", {})
-        
+        # ---------- Date ----------
+        now = datetime.now()
+        date_part = now.strftime("%d_%B_%Y")
+
+        # ---------- Standard Sites ----------
         standard_sites = [
             "EWS Tower 1",
             "EWS Tower 2",
             "EWS Tower 3",
-            "LIG Tower 3",
+            "LIG Tower 1",
             "LIG Tower 2",
-            "LIG Tower 1"
+            "LIG Tower 3",
+            "Common Area"
         ]
-        
-        def normalize_site_name(site):
-            # Simple normalization for EWS/LIG towers
-            site = site.strip()
-            # Handle various naming patterns
-            if "EWS" in site.upper() and "1" in site:
-                return "EWS Tower 1"
-            elif "EWS" in site.upper() and "2" in site:
-                return "EWS Tower 2"
-            elif "EWS" in site.upper() and "3" in site:
-                return "EWS Tower 3"
-            elif "LIG" in site.upper() and "1" in site:
-                return "LIG Tower 1"
-            elif "LIG" in site.upper() and "2" in site:
-                return "LIG Tower 2"
-            elif "LIG" in site.upper() and "3" in site:
-                return "LIG Tower 3"
-            return site
 
-        site_mapping = {k: normalize_site_name(k) for k in (resolved_sites.keys() | open_sites.keys())}
-        
-        worksheet.merge_range('A1:H1', report_title_ncr, title_format)
-        row = 1
-        worksheet.write(row, 0, 'Site', header_format)
-        worksheet.merge_range(row, 1, row, 3, 'NCR resolved beyond 21 days', header_format)
-        worksheet.merge_range(row, 4, row, 6, 'NCR open beyond 21 days', header_format)
-        worksheet.write(row, 7, 'Total', header_format)
-        
+        # ---------- Helper ----------
+        def detect_site_from_description(description):
+            """Use assign_site() to find correct tower or Common Area."""
+            result = assign_site(description, standard_sites)
+            return result[0] if result else "Common Area"
+
+        # ---------- NCR Data ----------
+        combined_result = all_reports.get("Combined_NCR", {})
+        resolved_data = combined_result.get("NCR resolved beyond 21 days", {})
+        open_data = combined_result.get("NCR open beyond 21 days", {})
+
+        resolved_sites = resolved_data.get("Sites", {}) if isinstance(resolved_data, dict) else {}
+        open_sites = open_data.get("Sites", {}) if isinstance(open_data, dict) else {}
+
+        site_mapping = {}
+        all_keys = set(resolved_sites.keys()) | set(open_sites.keys())
+        for k in all_keys:
+            descs = []
+            if k in resolved_sites:
+                descs.extend(resolved_sites[k].get("Descriptions", []))
+            if k in open_sites:
+                descs.extend(open_sites[k].get("Descriptions", []))
+            if descs:
+                site_mapping[k] = detect_site_from_description(descs[0])
+            else:
+                site_mapping[k] = detect_site_from_description(k)
+
+        # ---------- NCR Summary Sheet ----------
+        worksheet = workbook.add_worksheet('NCR Report')
+        worksheet.set_column('A:A', 20)
+        worksheet.set_column('B:H', 14)
+
+        # Row 0: Title
+        worksheet.merge_range('A1:H1', f"NCR Summary - {date_part}", title_format)
+
+        # Row 1: Column headers
+        worksheet.write(1, 0, 'Site', header_format)
+        worksheet.merge_range(1, 1, 1, 3, 'NCR resolved >21 days', header_format)
+        worksheet.merge_range(1, 4, 1, 6, 'NCR open >21 days', header_format)
+        worksheet.write(1, 7, 'Total', header_format)
+
+        # Row 2: Subheaders
         row = 2
         categories = ['Finishing', 'Works', 'MEP']
         worksheet.write(row, 0, '', header_format)
         for i, cat in enumerate(categories):
-            worksheet.write(row, i+1, cat, subheader_format)
+            worksheet.write(row, i + 1, cat, subheader_format)
         for i, cat in enumerate(categories):
-            worksheet.write(row, i+4, cat, subheader_format)
+            worksheet.write(row, i + 4, cat, subheader_format)
         worksheet.write(row, 7, '', header_format)
-        
+        row = 3
+
         category_map = {
             'Finishing': ['FW', 'Civil Finishing', 'Finishing'],
             'Works': ['SW', 'Structure', 'Works'],
             'MEP': ['MEP']
         }
-        
-        row = 3
-        site_totals = {}
-        
+
+        # Write site data with coloring
         for site in standard_sites:
-            # Find original keys that map to this standardized site
-            original_resolved_key = None
-            original_open_key = None
-            
-            for original_key, mapped_site in site_mapping.items():
-                if mapped_site == site:
-                    if original_key in resolved_sites:
-                        original_resolved_key = original_key
-                    if original_key in open_sites:
-                        original_open_key = original_key
-                
-            formats = tower_formats.get(site, {})
-            tower_total_format = formats.get('tower_total', workbook.add_format({
-                'bold': True, 'align': 'left', 'valign': 'vcenter', 'border': 1, 'fg_color': '#D3D3D3'
-            }))
-            site_format = formats.get('site', default_site_format)
-            cell_format = formats.get('cell', default_cell_format)
-            
-            resolved_counts = {'Finishing': 0, 'Works': 0, 'MEP': 0}
-            open_counts = {'Finishing': 0, 'Works': 0, 'MEP': 0}
-            
-            # Process resolved NCRs
-            if original_resolved_key and original_resolved_key in resolved_sites:
-                site_data = resolved_sites[original_resolved_key]
-                for display_cat, possible_keys in category_map.items():
-                    for key in possible_keys:
-                        value = site_data.get(key, 0)
-                        if isinstance(value, (int, float)) and value > 0:
-                            resolved_counts[display_cat] += value
-            
-            # Process open NCRs
-            if original_open_key and original_open_key in open_sites:
-                site_data = open_sites[original_open_key]
-                for display_cat, possible_keys in category_map.items():
-                    for key in possible_keys:
-                        value = site_data.get(key, 0)
-                        if isinstance(value, (int, float)) and value > 0:
-                            open_counts[display_cat] += value
-            
+            resolved_counts = {cat: 0 for cat in categories}
+            open_counts = {cat: 0 for cat in categories}
+            matching_keys = [k for k, v in site_mapping.items() if v == site]
+
+            for original_key in matching_keys:
+                if original_key in resolved_sites:
+                    sdata = resolved_sites[original_key]
+                    for cat, keys in category_map.items():
+                        for k in keys:
+                            val = sdata.get(k, 0)
+                            if isinstance(val, (int, float)):
+                                resolved_counts[cat] += val
+                if original_key in open_sites:
+                    sdata = open_sites[original_key]
+                    for cat, keys in category_map.items():
+                        for k in keys:
+                            val = sdata.get(k, 0)
+                            if isinstance(val, (int, float)):
+                                open_counts[cat] += val
+
             site_total = sum(resolved_counts.values()) + sum(open_counts.values())
-            
-            # Write site row
-            worksheet.write(row, 0, site, tower_total_format)
-            for i, display_cat in enumerate(categories):
-                worksheet.write(row, i+1, resolved_counts[display_cat], cell_format)
-            for i, display_cat in enumerate(categories):
-                worksheet.write(row, i+4, open_counts[display_cat], cell_format)
+            cell_format = tower_formats.get(site, default_cell_format)
+
+            worksheet.write(row, 0, site, cell_format)
+            for i, cat in enumerate(categories):
+                worksheet.write(row, i + 1, resolved_counts[cat], cell_format)
+                worksheet.write(row, i + 4, open_counts[cat], cell_format)
             worksheet.write(row, 7, site_total, cell_format)
-            
-            site_totals[site] = site_total
             row += 1
 
-        # Combined NCR Detail Sheets
-        def write_detail_sheet(sheet_name, data, title):
-            truncated_sheet_name = truncate_sheet_name(f"{sheet_name} {date_part}")
-            detail_worksheet = workbook.add_worksheet(truncated_sheet_name)
-            detail_worksheet.set_column('A:A', 20)
-            detail_worksheet.set_column('B:B', 60)
-            detail_worksheet.set_column('C:D', 20)
-            detail_worksheet.set_column('E:E', 15)
-            detail_worksheet.set_column('F:F', 15)
-            detail_worksheet.merge_range('A1:F1', f"{title} {date_part}", title_format)
+        # ---------- NCR Details ----------
+        def write_detail_sheet(sheet_name, data_dict, title):
+            sheet = workbook.add_worksheet(sheet_name[:30])
+            sheet.merge_range('A1:F1', f"{title} - {date_part}", title_format)
             headers = ['Site', 'Description', 'Created Date (WET)', 'Expected Close Date (WET)', 'Status', 'Discipline']
-            for col, header in enumerate(headers):
-                detail_worksheet.write(1, col, header, header_format)
+            for col, h in enumerate(headers):
+                sheet.write(1, col, h, header_format)
+            sheet.set_column('A:A', 20)
+            sheet.set_column('B:B', 60)
+            sheet.set_column('C:D', 20)
+            sheet.set_column('E:F', 15)
+            
             row = 2
-            for site, site_data in data.items():
-                normalized_site = site_mapping.get(site, site)
-                descriptions = site_data.get("Descriptions", [])
-                created_dates = site_data.get("Created Date (WET)", [])
-                close_dates = site_data.get("Expected Close Date (WET)", [])
-                statuses = site_data.get("Status", [])
-                disciplines = site_data.get("Discipline", [])
-                max_length = max(len(descriptions), len(created_dates), len(close_dates), len(statuses), len(disciplines))
-                for i in range(max_length):
-                    detail_worksheet.write(row, 0, normalized_site, default_site_format)
-                    detail_worksheet.write(row, 1, descriptions[i] if i < len(descriptions) else "", description_format)
-                    detail_worksheet.write(row, 2, created_dates[i] if i < len(created_dates) else "", default_cell_format)
-                    detail_worksheet.write(row, 3, close_dates[i] if i < len(close_dates) else "", default_cell_format)
-                    detail_worksheet.write(row, 4, statuses[i] if i < len(statuses) else "", default_cell_format)
-                    detail_worksheet.write(row, 5, disciplines[i] if i < len(disciplines) else "", default_cell_format)
+            for key, sdata in data_dict.items():
+                site = site_mapping.get(key, "Common Area")
+                descs = sdata.get("Descriptions", [])
+                created = sdata.get("Created Date (WET)", [])
+                close = sdata.get("Expected Close Date (WET)", [])
+                status = sdata.get("Status", [])
+                disc = sdata.get("Discipline", [])
+                maxlen = max(len(descs), len(created), len(close), len(status), len(disc))
+                
+                for i in range(maxlen):
+                    sheet.write(row, 0, site, default_site_format)
+                    sheet.write(row, 1, descs[i] if i < len(descs) else "", description_format)
+                    sheet.write(row, 2, created[i] if i < len(created) else "", default_cell_format)
+                    sheet.write(row, 3, close[i] if i < len(close) else "", default_cell_format)
+                    sheet.write(row, 4, status[i] if i < len(status) else "", default_cell_format)
+                    sheet.write(row, 5, disc[i] if i < len(disc) else "", default_cell_format)
                     row += 1
 
         if resolved_sites:
@@ -2113,73 +2077,38 @@ def generate_combined_excel_report_for_ews(all_reports, filename_prefix="All_Rep
         if open_sites:
             write_detail_sheet("Open NCR Details", open_sites, "Open NCR Details")
 
-        # 2. Safety and Housekeeping Reports
+        # ---------- Safety & Housekeeping ----------
         def write_safety_housekeeping_report(report_type, data, report_title, sheet_type):
-            worksheet = workbook.add_worksheet(truncate_sheet_name(f'{report_type} NCR {sheet_type} {date_part}'))
-            worksheet.set_column('A:A', 20)
-            worksheet.set_column('B:B', 15)
-            worksheet.merge_range('A1:B1', f"{report_title} - {sheet_type}", title_format)
-            row = 1
-            worksheet.write(row, 0, 'Site', header_format)
-            worksheet.write(row, 1, f'No. of {report_type} NCRs beyond 7 days', header_format)
-            sites_data = data.get(report_type, {}).get("Sites", {})
-            site_mapping = {k: normalize_site_name(k) for k in sites_data.keys()}
+            sheet = workbook.add_worksheet(f"{report_type} NCR {sheet_type}"[:31])
+            sheet.merge_range('A1:B1', f"{report_title} - {sheet_type}", title_format)
+            sheet.write(1, 0, 'Site', header_format)
+            sheet.write(1, 1, f'No. of {report_type} NCRs >7 days', header_format)
+            sheet.set_column('A:A', 20)
+            sheet.set_column('B:B', 15)
             row = 2
-            for site in standard_sites:
-                worksheet.write(row, 0, site, default_site_format)
-                original_key = next((k for k, v in site_mapping.items() if v == site), None)
-                value = sites_data[original_key].get("Count", 0) if original_key and original_key in sites_data else 0
-                worksheet.write(row, 1, value, default_cell_format)
-                row += 1
-                
-            # Details sheet
-            worksheet_details = workbook.add_worksheet(truncate_sheet_name(f'{report_type} NCR {sheet_type} Details {date_part}'))
-            worksheet_details.set_column('A:A', 20)
-            worksheet_details.set_column('B:B', 60)
-            worksheet_details.set_column('C:D', 20)
-            worksheet_details.set_column('E:E', 15)
-            worksheet_details.set_column('F:F', 15)
-            worksheet_details.merge_range('A1:F1', f"{report_title} - {sheet_type} Details", title_format)
-            headers = ['Site', 'Description', 'Created Date (WET)', 'Expected Close Date (WET)', 'Status', 'Discipline']
-            row = 1
-            for col, header in enumerate(headers):
-                worksheet_details.write(row, col, header, header_format)
-            row = 2
-            for site in standard_sites:
-                original_key = next((k for k, v in site_mapping.items() if v == site), None)
-                if original_key and original_key in sites_data:
-                    site_data = sites_data[original_key]
-                    descriptions = site_data.get("Descriptions", [])
-                    created_dates = site_data.get("Created Date (WET)", [])
-                    close_dates = site_data.get("Expected Close Date (WET)", [])
-                    statuses = site_data.get("Status", [])
-                    max_length = max(len(descriptions), len(created_dates), len(close_dates), len(statuses))
-                    for i in range(max_length):
-                        worksheet_details.write(row, 0, site, default_site_format)
-                        worksheet_details.write(row, 1, descriptions[i] if i < len(descriptions) else "", description_format)
-                        worksheet_details.write(row, 2, created_dates[i] if i < len(created_dates) else "", default_cell_format)
-                        worksheet_details.write(row, 3, close_dates[i] if i < len(close_dates) else "", default_cell_format)
-                        worksheet_details.write(row, 4, statuses[i] if i < len(statuses) else "", default_cell_format)
-                        worksheet_details.write(row, 5, "HSE", default_cell_format)
-                        row += 1
 
-        # Generate Safety and Housekeeping reports
-        safety_closed_data = all_reports.get("Safety_NCR_Closed", {})
-        report_title_safety = f"Safety NCR: {date_part}"
-        write_safety_housekeeping_report("Safety", safety_closed_data, report_title_safety, "Closed")
-        
-        safety_open_data = all_reports.get("Safety_NCR_Open", {})
-        write_safety_housekeeping_report("Safety", safety_open_data, report_title_safety, "Open")
-        
-        housekeeping_closed_data = all_reports.get("Housekeeping_NCR_Closed", {})
-        report_title_housekeeping = f"Housekeeping NCR: {date_part}"
-        write_safety_housekeeping_report("Housekeeping", housekeeping_closed_data, report_title_housekeeping, "Closed")
-        
-        housekeeping_open_data = all_reports.get("Housekeeping_NCR_Open", {})
-        write_safety_housekeeping_report("Housekeeping", housekeeping_open_data, report_title_housekeeping, "Open")
+            sites_data = data.get(report_type, {}).get("Sites", {}) if isinstance(data, dict) else {}
+            
+            for site in standard_sites:
+                sheet.write(row, 0, site, default_site_format)
+                count = 0
+                for k, s in sites_data.items():
+                    descs = s.get("Descriptions", [])
+                    detected = detect_site_from_description(descs[0]) if descs else detect_site_from_description(k)
+                    if detected == site:
+                        count += s.get("Count", 0)
+                sheet.write(row, 1, count, default_cell_format)
+                row += 1
+
+        # Safety + Housekeeping reports
+        write_safety_housekeeping_report("Safety", all_reports.get("Safety_NCR_Closed", {}), "Safety NCR", "Closed")
+        write_safety_housekeeping_report("Safety", all_reports.get("Safety_NCR_Open", {}), "Safety NCR", "Open")
+        write_safety_housekeeping_report("Housekeeping", all_reports.get("Housekeeping_NCR_Closed", {}), "Housekeeping NCR", "Closed")
+        write_safety_housekeeping_report("Housekeeping", all_reports.get("Housekeeping_NCR_Open", {}), "Housekeeping NCR", "Open")
 
     output.seek(0)
     return output
+
 
 # Streamlit UI
 
